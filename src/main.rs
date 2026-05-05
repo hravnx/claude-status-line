@@ -21,6 +21,12 @@ fn format_percentage_segment(label: &str, value: f64) -> String {
     )
 }
 
+fn percentage_at(json: &serde_json::Value, path: &[&str]) -> Option<f64> {
+    path.iter()
+        .try_fold(json, |value, key| value.get(*key))
+        .and_then(|value| value.as_f64())
+}
+
 fn main() {
     let mut input = String::new();
     if io::stdin().read_to_string(&mut input).is_err() {
@@ -33,29 +39,15 @@ fn main() {
 
     let mut segments = Vec::new();
 
-    if let Some(value) = json
-        .get("context_window")
-        .and_then(|context_window| context_window.get("used_percentage"))
-        .and_then(|used_percentage| used_percentage.as_f64())
-    {
+    if let Some(value) = percentage_at(&json, &["context_window", "used_percentage"]) {
         segments.push(format_percentage_segment("ctx", value));
     }
 
-    if let Some(value) = json
-        .get("rate_limits")
-        .and_then(|rate_limits| rate_limits.get("five_hour"))
-        .and_then(|five_hour| five_hour.get("used_percentage"))
-        .and_then(|used_percentage| used_percentage.as_f64())
-    {
+    if let Some(value) = percentage_at(&json, &["rate_limits", "five_hour", "used_percentage"]) {
         segments.push(format_percentage_segment("5h", value));
     }
 
-    if let Some(value) = json
-        .get("rate_limits")
-        .and_then(|rate_limits| rate_limits.get("seven_day"))
-        .and_then(|seven_day| seven_day.get("used_percentage"))
-        .and_then(|used_percentage| used_percentage.as_f64())
-    {
+    if let Some(value) = percentage_at(&json, &["rate_limits", "seven_day", "used_percentage"]) {
         segments.push(format_percentage_segment("7d", value));
     }
 
