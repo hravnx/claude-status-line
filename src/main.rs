@@ -1,4 +1,7 @@
-use std::io::{self, Read};
+use std::{
+    io::{self, Read},
+    process::Command,
+};
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_FG_BLACK: &str = "\x1b[38;5;0m";
@@ -44,6 +47,32 @@ fn string_at<'a>(json: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> 
         .and_then(|value| value.as_str())
 }
 
+fn git_branch(cwd: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C", cwd, "branch", "--show-current"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let branch = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
+fn active_branch(json: &serde_json::Value) -> Option<String> {
+    string_at(json, &["worktree", "branch"])
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string)
+        .or_else(|| string_at(json, &["cwd"]).and_then(git_branch))
+        .or_else(|| string_at(json, &["workspace", "current_dir"]).and_then(git_branch))
+}
+
 fn main() {
     let mut input = String::new();
     if io::stdin().read_to_string(&mut input).is_err() {
@@ -56,8 +85,8 @@ fn main() {
 
     let mut segments = Vec::new();
 
-    if let Some(branch) = string_at(&json, &["worktree", "branch"]) {
-        segments.push(format_branch_segment(branch));
+    if let Some(branch) = active_branch(&json) {
+        segments.push(format_branch_segment(&branch));
     }
 
     if let Some(value) = percentage_at(&json, &["context_window", "used_percentage"]) {
