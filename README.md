@@ -47,10 +47,10 @@ claude-status-line < tests/fixtures/schema.json
 
 Example output includes ANSI styling and segments like:
 
-![Example status line](docs/status-line.svg)
+![Example status line](docs/status-line-example.png)
 
 ```text
-~/dev/my-project  worktree-my-feature
+~/dev/my-project | worktree-my-feature
 Opus|high  ctx 32%  5h 81%  7d 65%  7d Fable 4%
 ```
 
