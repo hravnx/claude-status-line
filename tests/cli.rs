@@ -1,12 +1,20 @@
 use std::io::Write;
 use std::{
     fs,
+    path::Path,
     process::{Command, Stdio},
 };
 
 fn run_with_fixture(path: &str) -> String {
+    // Pin HOME to a directory without a .claude.json so the usage-cache
+    // fallback stays inert unless a test opts in.
+    run_with_fixture_and_home(path, "tests/fixtures")
+}
+
+fn run_with_fixture_and_home(path: &str, home: &str) -> String {
     let input = fs::read_to_string(path).expect("fixture should be readable");
     let mut child = Command::new(env!("CARGO_BIN_EXE_claude-status-line"))
+        .env("HOME", Path::new(env!("CARGO_MANIFEST_DIR")).join(home))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -53,6 +61,26 @@ fn prints_status_line_from_schema_example() {
             "\x1b[48;5;196m\x1b[38;5;0m ctx 81% \x1b[0m",
             "\x1b[48;5;34m\x1b[38;5;0m 5h 24% \x1b[0m",
             "\x1b[48;5;34m\x1b[38;5;0m 7d 42% \x1b[0m",
+            "\x1b[48;5;34m\x1b[38;5;0m 7d Fable 13% \x1b[0m",
+            "\x1b[48;5;24m\x1b[38;5;15m Opus|high \x1b[0m\n",
+        ]
+        .join(" ")
+    );
+}
+
+#[test]
+fn adds_model_scoped_segment_from_usage_cache() {
+    let stdout =
+        run_with_fixture_and_home("tests/fixtures/minimal-status.json", "tests/fixtures/home");
+
+    assert_eq!(
+        stdout,
+        [
+            "\x1b[48;5;60m\x1b[38;5;15m feature-test \x1b[0m",
+            "\x1b[48;5;220m\x1b[38;5;0m ctx 51% \x1b[0m",
+            "\x1b[48;5;34m\x1b[38;5;0m 5h 24% \x1b[0m",
+            "\x1b[48;5;196m\x1b[38;5;0m 7d 81% \x1b[0m",
+            "\x1b[48;5;34m\x1b[38;5;0m 7d Fable 4% \x1b[0m",
             "\x1b[48;5;24m\x1b[38;5;15m Opus|high \x1b[0m\n",
         ]
         .join(" ")

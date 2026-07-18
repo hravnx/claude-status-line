@@ -9,6 +9,8 @@ segments for:
 - worktree branch
 - context window usage
 - 5-hour and 7-day rate limit usage
+- per-model weekly rate limit usage (e.g. Fable), which is tracked
+  separately from the all-models 7-day limit
 
 Percentage segments are rounded up and colored by usage:
 
@@ -48,8 +50,21 @@ Example output includes ANSI styling and segments like:
 ![Example status line](docs/status-line.svg)
 
 ```text
-worktree-my-feature  ctx 32%  5h 81%  7d 65%  Opus|high
+worktree-my-feature  ctx 32%  5h 81%  7d 65%  7d Fable 4%  Opus|high
 ```
+
+### Per-model rate limits
+
+Some models (currently Fable) have their own weekly rate limit that is not
+included in the generic `seven_day` bucket. The formatter reads these from
+`rate_limits.model_scoped` in the status JSON when present. Claude Code does
+not emit that field yet, so as a fallback the formatter reads the usage
+snapshot Claude Code caches in `~/.claude.json`
+(`cachedUsageUtilization.utilization.limits`). The fallback is only used when
+the status JSON contains `rate_limits`, and it disappears automatically once
+Claude Code starts sending `model_scoped` itself. Note that the cache key is
+an undocumented Claude Code internal and may change between releases; if it
+does, the segment is silently omitted.
 
 ## Development
 
