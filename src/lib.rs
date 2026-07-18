@@ -4,27 +4,51 @@ use std::process::Command;
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_FG_BLACK: &str = "\x1b[38;5;0m";
 const ANSI_FG_WHITE: &str = "\x1b[38;5;15m";
+const ANSI_FG_ORANGE: &str = "\x1b[38;5;214m";
+const ANSI_FG_PURPLE: &str = "\x1b[38;5;63m";
+const ANSI_FG_DARK_RED: &str = "\x1b[38;5;124m";
 const ANSI_BG_BLUE: &str = "\x1b[48;5;24m";
-const ANSI_BG_PURPLE: &str = "\x1b[48;5;60m";
 const ANSI_BG_GREEN: &str = "\x1b[48;5;34m";
 const ANSI_BG_YELLOW: &str = "\x1b[48;5;220m";
 const ANSI_BG_RED: &str = "\x1b[48;5;196m";
 
 pub fn format_status_line(json: &serde_json::Value) -> Option<String> {
-    let segments = status_segments(json);
+    let lines: Vec<String> = status_lines(json)
+        .into_iter()
+        .filter(|segments| !segments.is_empty())
+        .map(|segments| segments.join(" "))
+        .collect();
 
-    if segments.is_empty() {
+    if lines.is_empty() {
         None
     } else {
-        Some(segments.join(" "))
+        Some(lines.join("\n"))
     }
 }
 
-fn status_segments(json: &serde_json::Value) -> Vec<String> {
+/// Two rows: workspace dir and branch on top, usage and model below.
+/// Claude Code renders each line of output as its own status row.
+fn status_lines(json: &serde_json::Value) -> [Vec<String>; 2] {
+    let mut top = Vec::new();
+
+    if let Some(dir) = workspace_dir(json) {
+        top.push(format_dir_segment(&dir));
+        top.push(format!("{ANSI_FG_PURPLE}|"));
+        top.push(match active_branch(json) {
+            Some(branch) => format_branch_segment(&branch),
+            None => format!("{ANSI_FG_DARK_RED}<no git branch>{ANSI_RESET}"),
+        });
+    } else if let Some(branch) = active_branch(json) {
+        top.push(format_branch_segment(&branch));
+    }
+
     let mut segments = Vec::new();
 
-    if let Some(branch) = active_branch(json) {
-        segments.push(format_branch_segment(&branch));
+    if let (Some(model_name), Some(effort_level)) = (
+        string_at(json, &["model", "display_name"]),
+        string_at(json, &["effort", "level"]),
+    ) {
+        segments.push(format_model_segment(model_name, effort_level));
     }
 
     add_percentage_segment(
@@ -53,14 +77,7 @@ fn status_segments(json: &serde_json::Value) -> Vec<String> {
         ));
     }
 
-    if let (Some(model_name), Some(effort_level)) = (
-        string_at(json, &["model", "display_name"]),
-        string_at(json, &["effort", "level"]),
-    ) {
-        segments.push(format_model_segment(model_name, effort_level));
-    }
-
-    segments
+    [top, segments]
 }
 
 fn add_percentage_segment(
@@ -94,7 +111,47 @@ fn format_model_segment(model_name: &str, effort_level: &str) -> String {
 }
 
 fn format_branch_segment(branch: &str) -> String {
-    format!("{ANSI_BG_PURPLE}{ANSI_FG_WHITE} {branch} {ANSI_RESET}")
+    format!("{ANSI_FG_ORANGE}{branch}{ANSI_RESET}")
+}
+
+fn format_dir_segment(dir: &str) -> String {
+    format!("{ANSI_FG_WHITE}{dir}{ANSI_RESET}")
+}
+
+fn workspace_dir(json: &serde_json::Value) -> Option<String> {
+    workspace_dir_with(json, home_dir())
+}
+
+fn workspace_dir_with(json: &serde_json::Value, home: Option<PathBuf>) -> Option<String> {
+    let dir = string_at(json, &["workspace", "current_dir"])
+        .or_else(|| string_at(json, &["cwd"]))
+        .filter(|dir| !dir.is_empty())?;
+
+    Some(tildify(dir, home.as_deref().and_then(|home| home.to_str())))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    // HOME on unix; USERPROFILE on Windows.
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
+fn tildify(path: &str, home: Option<&str>) -> String {
+    let Some(home) = home.map(|home| home.trim_end_matches(['/', '\\'])) else {
+        return path.to_string();
+    };
+
+    if home.is_empty() {
+        return path.to_string();
+    }
+
+    match path.strip_prefix(home) {
+        Some("") => "~".to_string(),
+        Some(rest) if rest.starts_with(['/', '\\']) => format!("~{rest}"),
+        _ => path.to_string(),
+    }
 }
 
 /// Per-model weekly rate limits (e.g. Fable), reported separately from the
@@ -244,9 +301,10 @@ mod tests {
             format_model_segment("Opus", "high"),
             "\x1b[48;5;24m\x1b[38;5;15m Opus|high \x1b[0m"
         );
+        assert_eq!(format_branch_segment("main"), "\x1b[38;5;214mmain\x1b[0m");
         assert_eq!(
-            format_branch_segment("main"),
-            "\x1b[48;5;60m\x1b[38;5;15m main \x1b[0m"
+            format_dir_segment("~/dev/project"),
+            "\x1b[38;5;15m~/dev/project\x1b[0m"
         );
     }
 
@@ -275,6 +333,7 @@ mod tests {
     #[test]
     fn builds_status_line_from_json_fields() {
         let status = json!({
+            "workspace": { "current_dir": "/srv/example/project" },
             "worktree": { "branch": "feature" },
             "context_window": { "used_percentage": 50.1 },
             "rate_limits": {
@@ -288,20 +347,104 @@ mod tests {
             "effort": { "level": "high" }
         });
 
+        let top_line = [
+            "\x1b[38;5;15m/srv/example/project\x1b[0m",
+            "\x1b[38;5;63m|",
+            "\x1b[38;5;214mfeature\x1b[0m",
+        ]
+        .join(" ");
+        let bottom_line = [
+            "\x1b[48;5;24m\x1b[38;5;15m Opus|high \x1b[0m",
+            "\x1b[48;5;220m\x1b[38;5;0m ctx 51% \x1b[0m",
+            "\x1b[48;5;34m\x1b[38;5;0m 5h 24% \x1b[0m",
+            "\x1b[48;5;196m\x1b[38;5;0m 7d 81% \x1b[0m",
+            "\x1b[48;5;34m\x1b[38;5;0m 7d Fable 13% \x1b[0m",
+        ]
+        .join(" ");
+
+        assert_eq!(
+            format_status_line(&status),
+            Some(format!("{top_line}\n{bottom_line}"))
+        );
+    }
+
+    #[test]
+    fn renders_partial_payloads() {
+        // A branch without a dir renders alone, without the separator.
+        let only_branch = json!({ "worktree": { "branch": "feature" } });
+        assert_eq!(
+            format_status_line(&only_branch),
+            Some("\x1b[38;5;214mfeature\x1b[0m".to_string())
+        );
+
+        let only_bottom = json!({ "context_window": { "used_percentage": 42.0 } });
+        assert_eq!(
+            format_status_line(&only_bottom),
+            Some("\x1b[48;5;34m\x1b[38;5;0m ctx 42% \x1b[0m".to_string())
+        );
+    }
+
+    #[test]
+    fn shows_placeholder_when_dir_has_no_branch() {
+        // A directory that exists nowhere fails the git lookup, so the
+        // branch side falls back to the placeholder.
+        let status = json!({
+            "workspace": { "current_dir": "/nonexistent-dir-for-test" }
+        });
+
         assert_eq!(
             format_status_line(&status),
             Some(
                 [
-                    "\x1b[48;5;60m\x1b[38;5;15m feature \x1b[0m",
-                    "\x1b[48;5;220m\x1b[38;5;0m ctx 51% \x1b[0m",
-                    "\x1b[48;5;34m\x1b[38;5;0m 5h 24% \x1b[0m",
-                    "\x1b[48;5;196m\x1b[38;5;0m 7d 81% \x1b[0m",
-                    "\x1b[48;5;34m\x1b[38;5;0m 7d Fable 13% \x1b[0m",
-                    "\x1b[48;5;24m\x1b[38;5;15m Opus|high \x1b[0m",
+                    "\x1b[38;5;15m/nonexistent-dir-for-test\x1b[0m",
+                    "\x1b[38;5;63m|",
+                    "\x1b[38;5;124m<no git branch>\x1b[0m",
                 ]
                 .join(" ")
             )
         );
+    }
+
+    #[test]
+    fn replaces_home_prefix_with_tilde() {
+        assert_eq!(
+            tildify("/Users/jane/dev/project", Some("/Users/jane")),
+            "~/dev/project"
+        );
+        assert_eq!(tildify("/Users/jane", Some("/Users/jane")), "~");
+        assert_eq!(tildify("/Users/jane/dev", Some("/Users/jane/")), "~/dev");
+        assert_eq!(
+            tildify("/Users/janedoe/dev", Some("/Users/jane")),
+            "/Users/janedoe/dev"
+        );
+        assert_eq!(tildify("/srv/project", None), "/srv/project");
+        assert_eq!(
+            tildify(r"C:\Users\jane\dev\project", Some(r"C:\Users\jane")),
+            r"~\dev\project"
+        );
+    }
+
+    #[test]
+    fn builds_workspace_dir_segment_value() {
+        let status = json!({
+            "cwd": "/fallback/dir",
+            "workspace": { "current_dir": "/Users/jane/dev/some-quite-long-project-name" }
+        });
+
+        let dir = workspace_dir_with(&status, Some(PathBuf::from("/Users/jane")));
+
+        assert_eq!(dir, Some("~/dev/some-quite-long-project-name".to_string()));
+    }
+
+    #[test]
+    fn workspace_dir_falls_back_to_cwd() {
+        let status = json!({ "cwd": "/fallback/dir" });
+
+        assert_eq!(
+            workspace_dir_with(&status, None),
+            Some("/fallback/dir".to_string())
+        );
+        assert_eq!(workspace_dir_with(&json!({}), None), None);
     }
 
     #[test]

@@ -3,10 +3,10 @@
 A small Rust status-line formatter for Claude Code.
 
 It reads Claude Code status JSON from stdin and prints compact ANSI-colored
-segments for:
+segments across two rows. The first row shows the workspace directory (with
+the home directory shown as `~`) and the branch; the second row shows:
 
 - model and effort level
-- worktree branch
 - context window usage
 - 5-hour and 7-day rate limit usage
 - per-model weekly rate limit usage (e.g. Fable), which is tracked
@@ -50,7 +50,8 @@ Example output includes ANSI styling and segments like:
 ![Example status line](docs/status-line.svg)
 
 ```text
-worktree-my-feature  ctx 32%  5h 81%  7d 65%  7d Fable 4%  Opus|high
+~/dev/my-project  worktree-my-feature
+Opus|high  ctx 32%  5h 81%  7d 65%  7d Fable 4%
 ```
 
 ### Per-model rate limits

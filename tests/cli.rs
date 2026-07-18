@@ -37,35 +37,38 @@ fn run_with_fixture_and_home(path: &str, home: &str) -> String {
 fn prints_status_line_from_minimal_json() {
     let stdout = run_with_fixture("tests/fixtures/minimal-status.json");
 
-    assert_eq!(
-        stdout,
-        [
-            "\x1b[48;5;60m\x1b[38;5;15m feature-test \x1b[0m",
-            "\x1b[48;5;220m\x1b[38;5;0m ctx 51% \x1b[0m",
-            "\x1b[48;5;34m\x1b[38;5;0m 5h 24% \x1b[0m",
-            "\x1b[48;5;196m\x1b[38;5;0m 7d 81% \x1b[0m",
-            "\x1b[48;5;24m\x1b[38;5;15m Opus|high \x1b[0m\n",
-        ]
-        .join(" ")
-    );
+    let top_line = "\x1b[38;5;214mfeature-test\x1b[0m";
+    let bottom_line = [
+        "\x1b[48;5;24m\x1b[38;5;15m Opus|high \x1b[0m",
+        "\x1b[48;5;220m\x1b[38;5;0m ctx 51% \x1b[0m",
+        "\x1b[48;5;34m\x1b[38;5;0m 5h 24% \x1b[0m",
+        "\x1b[48;5;196m\x1b[38;5;0m 7d 81% \x1b[0m",
+    ]
+    .join(" ");
+
+    assert_eq!(stdout, format!("{top_line}\n{bottom_line}\n"));
 }
 
 #[test]
 fn prints_status_line_from_schema_example() {
     let stdout = run_with_fixture("tests/fixtures/schema.json");
 
-    assert_eq!(
-        stdout,
-        [
-            "\x1b[48;5;60m\x1b[38;5;15m worktree-my-feature \x1b[0m",
-            "\x1b[48;5;196m\x1b[38;5;0m ctx 81% \x1b[0m",
-            "\x1b[48;5;34m\x1b[38;5;0m 5h 24% \x1b[0m",
-            "\x1b[48;5;34m\x1b[38;5;0m 7d 42% \x1b[0m",
-            "\x1b[48;5;34m\x1b[38;5;0m 7d Fable 13% \x1b[0m",
-            "\x1b[48;5;24m\x1b[38;5;15m Opus|high \x1b[0m\n",
-        ]
-        .join(" ")
-    );
+    let top_line = [
+        "\x1b[38;5;15m/current/working/directory\x1b[0m",
+        "\x1b[38;5;63m|",
+        "\x1b[38;5;214mworktree-my-feature\x1b[0m",
+    ]
+    .join(" ");
+    let bottom_line = [
+        "\x1b[48;5;24m\x1b[38;5;15m Opus|high \x1b[0m",
+        "\x1b[48;5;196m\x1b[38;5;0m ctx 81% \x1b[0m",
+        "\x1b[48;5;34m\x1b[38;5;0m 5h 24% \x1b[0m",
+        "\x1b[48;5;34m\x1b[38;5;0m 7d 42% \x1b[0m",
+        "\x1b[48;5;34m\x1b[38;5;0m 7d Fable 13% \x1b[0m",
+    ]
+    .join(" ");
+
+    assert_eq!(stdout, format!("{top_line}\n{bottom_line}\n"));
 }
 
 #[test]
@@ -73,18 +76,17 @@ fn adds_model_scoped_segment_from_usage_cache() {
     let stdout =
         run_with_fixture_and_home("tests/fixtures/minimal-status.json", "tests/fixtures/home");
 
-    assert_eq!(
-        stdout,
-        [
-            "\x1b[48;5;60m\x1b[38;5;15m feature-test \x1b[0m",
-            "\x1b[48;5;220m\x1b[38;5;0m ctx 51% \x1b[0m",
-            "\x1b[48;5;34m\x1b[38;5;0m 5h 24% \x1b[0m",
-            "\x1b[48;5;196m\x1b[38;5;0m 7d 81% \x1b[0m",
-            "\x1b[48;5;34m\x1b[38;5;0m 7d Fable 4% \x1b[0m",
-            "\x1b[48;5;24m\x1b[38;5;15m Opus|high \x1b[0m\n",
-        ]
-        .join(" ")
-    );
+    let top_line = "\x1b[38;5;214mfeature-test\x1b[0m";
+    let bottom_line = [
+        "\x1b[48;5;24m\x1b[38;5;15m Opus|high \x1b[0m",
+        "\x1b[48;5;220m\x1b[38;5;0m ctx 51% \x1b[0m",
+        "\x1b[48;5;34m\x1b[38;5;0m 5h 24% \x1b[0m",
+        "\x1b[48;5;196m\x1b[38;5;0m 7d 81% \x1b[0m",
+        "\x1b[48;5;34m\x1b[38;5;0m 7d Fable 4% \x1b[0m",
+    ]
+    .join(" ");
+
+    assert_eq!(stdout, format!("{top_line}\n{bottom_line}\n"));
 }
 
 #[test]
