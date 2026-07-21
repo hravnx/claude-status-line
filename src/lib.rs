@@ -13,7 +13,11 @@ const ANSI_BG_YELLOW: &str = "\x1b[48;5;220m";
 const ANSI_BG_RED: &str = "\x1b[48;5;196m";
 
 pub fn format_status_line(json: &serde_json::Value) -> Option<String> {
-    let lines: Vec<String> = status_lines(json)
+    format_status_line_with(json, now())
+}
+
+fn format_status_line_with(json: &serde_json::Value, now: i64) -> Option<String> {
+    let lines: Vec<String> = status_lines(json, now)
         .into_iter()
         .filter(|segments| !segments.is_empty())
         .map(|segments| segments.join(" "))
@@ -26,9 +30,26 @@ pub fn format_status_line(json: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// Current time as Unix epoch seconds. Honors `CLAUDE_STATUS_LINE_NOW` (epoch
+/// seconds) when set, which lets the end-to-end tests pin a deterministic clock
+/// across the process boundary; production leaves it unset and reads the system
+/// clock.
+fn now() -> i64 {
+    if let Some(raw) = std::env::var_os("CLAUDE_STATUS_LINE_NOW")
+        && let Some(secs) = raw.to_str().and_then(|s| s.trim().parse::<i64>().ok())
+    {
+        return secs;
+    }
+
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
 /// Two rows: workspace dir and branch on top, usage and model below.
 /// Claude Code renders each line of output as its own status row.
-fn status_lines(json: &serde_json::Value) -> [Vec<String>; 2] {
+fn status_lines(json: &serde_json::Value, now: i64) -> [Vec<String>; 2] {
     let mut top = Vec::new();
 
     if let Some(dir) = workspace_dir(json) {
@@ -57,24 +78,29 @@ fn status_lines(json: &serde_json::Value) -> [Vec<String>; 2] {
         "ctx",
         &["context_window", "used_percentage"],
     );
-    add_percentage_segment(
+    add_window_segment(
         &mut segments,
         json,
         "5h",
         &["rate_limits", "five_hour", "used_percentage"],
+        &["rate_limits", "five_hour", "resets_at"],
+        now,
     );
-    add_percentage_segment(
+    add_window_segment(
         &mut segments,
         json,
         "7d",
         &["rate_limits", "seven_day", "used_percentage"],
+        &["rate_limits", "seven_day", "resets_at"],
+        now,
     );
 
-    for (model_name, value) in model_scoped_limits(json) {
-        segments.push(format_percentage_segment(
-            &format!("7d {model_name}"),
-            value,
-        ));
+    for (model_name, value, resets_at) in model_scoped_limits(json) {
+        let label = match resets_at.as_deref().and_then(parse_iso8601) {
+            Some(resets_at) => format!("{} {model_name}", format_remaining(resets_at - now)),
+            None => format!("7d {model_name}"),
+        };
+        segments.push(format_percentage_segment(&label, value));
     }
 
     [top, segments]
@@ -88,6 +114,57 @@ fn add_percentage_segment(
 ) {
     if let Some(value) = percentage_at(json, path) {
         segments.push(format_percentage_segment(label, value));
+    }
+}
+
+/// Like `add_percentage_segment`, but for rate-limit windows: the label shows
+/// the time remaining until the window resets (from `resets_path`) instead of a
+/// fixed name. Falls back to `fallback_label` when no reset time is available.
+fn add_window_segment(
+    segments: &mut Vec<String>,
+    json: &serde_json::Value,
+    fallback_label: &str,
+    percentage_path: &[&str],
+    resets_path: &[&str],
+    now: i64,
+) {
+    let Some(value) = percentage_at(json, percentage_path) else {
+        return;
+    };
+
+    let label = match epoch_at(json, resets_path) {
+        Some(resets_at) => format_remaining(resets_at - now),
+        None => fallback_label.to_string(),
+    };
+    segments.push(format_percentage_segment(&label, value));
+}
+
+/// Compact remaining time using the two largest non-zero units (e.g. `4h12m`,
+/// `6d3h`, `47m`). A zero secondary unit is dropped (`6d`, `1h`). Anything at or
+/// below one minute — including already-expired windows — renders `<1m`.
+fn format_remaining(secs: i64) -> String {
+    if secs <= 60 {
+        return "<1m".to_string();
+    }
+
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let minutes = (secs % 3_600) / 60;
+
+    if days > 0 {
+        if hours > 0 {
+            format!("{days}d{hours}h")
+        } else {
+            format!("{days}d")
+        }
+    } else if hours > 0 {
+        if minutes > 0 {
+            format!("{hours}h{minutes}m")
+        } else {
+            format!("{hours}h")
+        }
+    } else {
+        format!("{minutes}m")
     }
 }
 
@@ -160,11 +237,14 @@ fn tildify(path: &str, home: Option<&str>) -> String {
 /// Preferred source is `rate_limits.model_scoped` in the status JSON. Claude
 /// Code does not emit that field yet, so until it does, fall back to the
 /// usage snapshot it caches in `~/.claude.json`.
-fn model_scoped_limits(json: &serde_json::Value) -> Vec<(String, f64)> {
+fn model_scoped_limits(json: &serde_json::Value) -> Vec<(String, f64, Option<String>)> {
     model_scoped_limits_with(json, load_usage_cache)
 }
 
-fn model_scoped_limits_with<F>(json: &serde_json::Value, load_usage_cache: F) -> Vec<(String, f64)>
+fn model_scoped_limits_with<F>(
+    json: &serde_json::Value,
+    load_usage_cache: F,
+) -> Vec<(String, f64, Option<String>)>
 where
     F: Fn() -> Option<serde_json::Value>,
 {
@@ -183,7 +263,7 @@ where
         .unwrap_or_default()
 }
 
-fn payload_model_scoped(json: &serde_json::Value) -> Option<Vec<(String, f64)>> {
+fn payload_model_scoped(json: &serde_json::Value) -> Option<Vec<(String, f64, Option<String>)>> {
     let entries = json.get("rate_limits")?.get("model_scoped")?.as_array()?;
 
     Some(
@@ -192,13 +272,14 @@ fn payload_model_scoped(json: &serde_json::Value) -> Option<Vec<(String, f64)>> 
             .filter_map(|entry| {
                 let name = string_at(entry, &["display_name"])?;
                 let value = percentage_at(entry, &["utilization"])?;
-                Some((name.to_string(), value))
+                let resets_at = string_at(entry, &["resets_at"]).map(str::to_string);
+                Some((name.to_string(), value, resets_at))
             })
             .collect(),
     )
 }
 
-fn cached_model_scoped(cache: &serde_json::Value) -> Vec<(String, f64)> {
+fn cached_model_scoped(cache: &serde_json::Value) -> Vec<(String, f64, Option<String>)> {
     let limits = cache
         .get("cachedUsageUtilization")
         .and_then(|value| value.get("utilization"))
@@ -214,7 +295,8 @@ fn cached_model_scoped(cache: &serde_json::Value) -> Vec<(String, f64)> {
             }
             let name = string_at(entry, &["scope", "model", "display_name"])?;
             let value = percentage_at(entry, &["percent"])?;
-            Some((name.to_string(), value))
+            let resets_at = string_at(entry, &["resets_at"]).map(str::to_string);
+            Some((name.to_string(), value, resets_at))
         })
         .collect()
 }
@@ -235,6 +317,89 @@ fn string_at<'a>(json: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> 
     path.iter()
         .try_fold(json, |value, key| value.get(*key))
         .and_then(|value| value.as_str())
+}
+
+/// Reads an integer Unix-epoch value at `path`. `five_hour`/`seven_day`
+/// `resets_at` are reported as integer seconds; `null`, missing, or non-integer
+/// values yield `None`.
+fn epoch_at(json: &serde_json::Value, path: &[&str]) -> Option<i64> {
+    path.iter()
+        .try_fold(json, |value, key| value.get(*key))
+        .and_then(|value| value.as_i64())
+}
+
+/// Parses the RFC-3339 subset Claude Code emits for `model_scoped` reset times
+/// (`YYYY-MM-DDTHH:MM:SS[.fraction][Z|±HH:MM|±HHMM]`) into Unix epoch seconds.
+/// Fractional seconds are ignored. Any malformed input yields `None`, which
+/// callers treat as "no reset time" and fall back to the static label.
+fn parse_iso8601(s: &str) -> Option<i64> {
+    let bytes = s.as_bytes();
+
+    let year: i64 = s.get(0..4)?.parse().ok()?;
+    if bytes.get(4)? != &b'-' {
+        return None;
+    }
+    let month: i64 = s.get(5..7)?.parse().ok()?;
+    if bytes.get(7)? != &b'-' {
+        return None;
+    }
+    let day: i64 = s.get(8..10)?.parse().ok()?;
+    match bytes.get(10)? {
+        b'T' | b't' | b' ' => {}
+        _ => return None,
+    }
+    let hour: i64 = s.get(11..13)?.parse().ok()?;
+    if bytes.get(13)? != &b':' {
+        return None;
+    }
+    let minute: i64 = s.get(14..16)?.parse().ok()?;
+    if bytes.get(16)? != &b':' {
+        return None;
+    }
+    let second: i64 = s.get(17..19)?.parse().ok()?;
+
+    // Skip an optional ".fraction", then interpret the timezone token.
+    let rest = s.get(19..)?;
+    let tz = rest.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    let offset_secs = parse_tz_offset(tz)?;
+
+    let days = days_from_civil(year, month, day)?;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second - offset_secs)
+}
+
+/// `Z`/`z` -> 0; `+HH:MM`/`-HH:MM`/`+HHMM` -> seconds east of UTC.
+fn parse_tz_offset(tz: &str) -> Option<i64> {
+    match tz.as_bytes().first()? {
+        b'Z' | b'z' => Some(0),
+        sign @ (b'+' | b'-') => {
+            let hours: i64 = tz.get(1..3)?.parse().ok()?;
+            let minute_start = if tz.as_bytes().get(3) == Some(&b':') {
+                4
+            } else {
+                3
+            };
+            let minutes: i64 = tz.get(minute_start..minute_start + 2)?.parse().ok()?;
+            let magnitude = hours * 3_600 + minutes * 60;
+            Some(if *sign == b'-' { -magnitude } else { magnitude })
+        }
+        _ => None,
+    }
+}
+
+/// Howard Hinnant's `days_from_civil`: days since 1970-01-01 in the proleptic
+/// Gregorian calendar. Returns `None` for out-of-range months or days.
+fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let year_of_era = y - era * 400;
+    let month_prime = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
 }
 
 fn git_branch(cwd: &str) -> Option<String> {
@@ -459,7 +624,7 @@ mod tests {
 
         let limits = model_scoped_limits_with(&status, || panic!("cache should not be read"));
 
-        assert_eq!(limits, vec![("Fable".to_string(), 12.3)]);
+        assert_eq!(limits, vec![("Fable".to_string(), 12.3, None)]);
     }
 
     #[test]
@@ -485,7 +650,7 @@ mod tests {
 
         let limits = model_scoped_limits_with(&status, || Some(cache.clone()));
 
-        assert_eq!(limits, vec![("Fable".to_string(), 4.0)]);
+        assert_eq!(limits, vec![("Fable".to_string(), 4.0, None)]);
     }
 
     #[test]
@@ -541,5 +706,85 @@ mod tests {
         });
 
         assert_eq!(branch, Some("develop".to_string()));
+    }
+
+    #[test]
+    fn formats_remaining_with_two_largest_units() {
+        assert_eq!(format_remaining(-1), "<1m");
+        assert_eq!(format_remaining(0), "<1m");
+        assert_eq!(format_remaining(60), "<1m");
+        assert_eq!(format_remaining(61), "1m");
+        assert_eq!(format_remaining(2820), "47m");
+        assert_eq!(format_remaining(3600), "1h");
+        assert_eq!(format_remaining(15120), "4h12m");
+        assert_eq!(format_remaining(518400), "6d");
+        assert_eq!(format_remaining(529200), "6d3h");
+    }
+
+    #[test]
+    fn parses_iso8601_reset_timestamps() {
+        // The three spellings all denote the same instant.
+        assert_eq!(
+            parse_iso8601("2026-07-22T03:59:59.769790+00:00"),
+            Some(1784692799)
+        );
+        assert_eq!(parse_iso8601("2026-07-22T03:59:59Z"), Some(1784692799));
+        assert_eq!(parse_iso8601("2026-07-22T05:59:59+02:00"), Some(1784692799));
+
+        assert_eq!(parse_iso8601("not a date"), None);
+        assert_eq!(parse_iso8601("2026-13-01T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn window_labels_show_time_remaining() {
+        let now = 1_000_000_000;
+        let status = json!({
+            "context_window": { "used_percentage": 10.0 },
+            "rate_limits": {
+                "five_hour": { "used_percentage": 23.5, "resets_at": now + 15_120 },
+                "seven_day": { "used_percentage": 80.1, "resets_at": now + 529_200 },
+                "model_scoped": [
+                    { "display_name": "Fable", "utilization": 12.3,
+                      "resets_at": "2026-07-22T03:59:59.769790+00:00" }
+                ]
+            }
+        });
+
+        let out = format_status_line_with(&status, now).expect("segments should render");
+
+        assert!(out.contains(" 4h12m 24% "), "5h window: {out}");
+        assert!(out.contains(" 6d3h 81% "), "7d window: {out}");
+        // model_scoped reset is fixed, so pin the countdown against a fixed now.
+        let out = format_status_line_with(&status, 1_784_592_000).expect("segments should render");
+        assert!(out.contains(" 1d3h Fable 13% "), "per-model window: {out}");
+    }
+
+    #[test]
+    fn window_labels_fall_back_when_reset_time_absent() {
+        let status = json!({
+            "rate_limits": {
+                "five_hour": { "used_percentage": 23.5 },
+                "seven_day": { "used_percentage": 80.1 }
+            }
+        });
+
+        let out = format_status_line_with(&status, 1_000_000_000).expect("segments should render");
+
+        assert!(out.contains(" 5h 24% "), "5h fallback: {out}");
+        assert!(out.contains(" 7d 81% "), "7d fallback: {out}");
+    }
+
+    #[test]
+    fn window_labels_show_expired_windows_as_under_a_minute() {
+        let now = 1_000_000_000;
+        let status = json!({
+            "rate_limits": {
+                "five_hour": { "used_percentage": 23.5, "resets_at": now - 100 }
+            }
+        });
+
+        let out = format_status_line_with(&status, now).expect("segments should render");
+
+        assert!(out.contains(" <1m 24% "), "expired window: {out}");
     }
 }

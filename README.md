@@ -12,6 +12,13 @@ the home directory shown as `~`) and the branch; the second row shows:
 - per-model weekly rate limit usage (e.g. Fable), which is tracked
   separately from the all-models 7-day limit
 
+For each rate limit window, the segment label shows the **time remaining
+until that window resets** (e.g. `4h12m`, `6d3h`, `<1m`) rather than a fixed
+name, so `5h`/`7d`/`7d Fable` become live countdowns. If Claude Code does not
+report a reset time for a window, the label falls back to its static name
+(`5h`, `7d`, `7d <model>`). The context window has no reset time, so it keeps
+its `ctx` label.
+
 Percentage segments are rounded up and colored by usage:
 
 - green: up to 50%
@@ -51,7 +58,7 @@ Example output includes ANSI styling and segments like:
 
 ```text
 ~/dev/my-project | worktree-my-feature
-Opus|high  ctx 32%  5h 81%  7d 65%  7d Fable 4%
+Opus|high  ctx 32%  3h12m 81%  5d4h 65%  2d1h Fable 4%
 ```
 
 ### Per-model rate limits

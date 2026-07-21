@@ -15,6 +15,9 @@ fn run_with_fixture_and_home(path: &str, home: &str) -> String {
     let input = fs::read_to_string(path).expect("fixture should be readable");
     let mut child = Command::new(env!("CARGO_BIN_EXE_claude-status-line"))
         .env("HOME", Path::new(env!("CARGO_MANIFEST_DIR")).join(home))
+        // Pin the clock so time-remaining labels render deterministically.
+        // 1784592000 = 2026-07-21T00:00:00Z.
+        .env("CLAUDE_STATUS_LINE_NOW", "1784592000")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -62,9 +65,9 @@ fn prints_status_line_from_schema_example() {
     let bottom_line = [
         "\x1b[48;5;24m\x1b[38;5;15m Opus|high \x1b[0m",
         "\x1b[48;5;196m\x1b[38;5;0m ctx 81% \x1b[0m",
-        "\x1b[48;5;34m\x1b[38;5;0m 5h 24% \x1b[0m",
-        "\x1b[48;5;34m\x1b[38;5;0m 7d 42% \x1b[0m",
-        "\x1b[48;5;34m\x1b[38;5;0m 7d Fable 13% \x1b[0m",
+        "\x1b[48;5;34m\x1b[38;5;0m 4h12m 24% \x1b[0m",
+        "\x1b[48;5;34m\x1b[38;5;0m 6d3h 42% \x1b[0m",
+        "\x1b[48;5;34m\x1b[38;5;0m 1d3h Fable 13% \x1b[0m",
     ]
     .join(" ");
 
@@ -82,7 +85,7 @@ fn adds_model_scoped_segment_from_usage_cache() {
         "\x1b[48;5;220m\x1b[38;5;0m ctx 51% \x1b[0m",
         "\x1b[48;5;34m\x1b[38;5;0m 5h 24% \x1b[0m",
         "\x1b[48;5;196m\x1b[38;5;0m 7d 81% \x1b[0m",
-        "\x1b[48;5;34m\x1b[38;5;0m 7d Fable 4% \x1b[0m",
+        "\x1b[48;5;34m\x1b[38;5;0m 1d3h Fable 4% \x1b[0m",
     ]
     .join(" ");
 
