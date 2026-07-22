@@ -13,11 +13,11 @@ const ANSI_BG_YELLOW: &str = "\x1b[48;5;220m";
 const ANSI_BG_RED: &str = "\x1b[48;5;196m";
 
 pub fn format_status_line(json: &serde_json::Value) -> Option<String> {
-    format_status_line_with(json, now())
+    format_status_line_with(json, now(), time_display())
 }
 
-fn format_status_line_with(json: &serde_json::Value, now: i64) -> Option<String> {
-    let lines: Vec<String> = status_lines(json, now)
+fn format_status_line_with(json: &serde_json::Value, now: i64, time: TimeDisplay) -> Option<String> {
+    let lines: Vec<String> = status_lines(json, now, time)
         .into_iter()
         .filter(|segments| !segments.is_empty())
         .map(|segments| segments.join(" "))
@@ -47,9 +47,35 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// How rate-limit window labels render the time remaining until the window
+/// resets, controlled by `CLAUDE_STATUS_LINE_TIME`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TimeDisplay {
+    /// Two largest non-zero units (`4h12m`). Default.
+    Normal,
+    /// Static labels only (`5h`, `7d`), no countdown.
+    None,
+    /// Single largest unit (`4h`).
+    Short,
+}
+
+fn time_display() -> TimeDisplay {
+    time_display_from(std::env::var("CLAUDE_STATUS_LINE_TIME").ok().as_deref())
+}
+
+/// Unset, `normal`, or anything unrecognized means `Normal`, so a typo
+/// degrades to the default rather than hiding information.
+fn time_display_from(value: Option<&str>) -> TimeDisplay {
+    match value.map(str::trim) {
+        Some(v) if v.eq_ignore_ascii_case("none") => TimeDisplay::None,
+        Some(v) if v.eq_ignore_ascii_case("short") => TimeDisplay::Short,
+        _ => TimeDisplay::Normal,
+    }
+}
+
 /// Two rows: workspace dir and branch on top, usage and model below.
 /// Claude Code renders each line of output as its own status row.
-fn status_lines(json: &serde_json::Value, now: i64) -> [Vec<String>; 2] {
+fn status_lines(json: &serde_json::Value, now: i64, time: TimeDisplay) -> [Vec<String>; 2] {
     let mut top = Vec::new();
 
     if let Some(dir) = workspace_dir(json) {
@@ -85,6 +111,7 @@ fn status_lines(json: &serde_json::Value, now: i64) -> [Vec<String>; 2] {
         &["rate_limits", "five_hour", "used_percentage"],
         &["rate_limits", "five_hour", "resets_at"],
         now,
+        time,
     );
     add_window_segment(
         &mut segments,
@@ -93,11 +120,13 @@ fn status_lines(json: &serde_json::Value, now: i64) -> [Vec<String>; 2] {
         &["rate_limits", "seven_day", "used_percentage"],
         &["rate_limits", "seven_day", "resets_at"],
         now,
+        time,
     );
 
     for (model_name, value, resets_at) in model_scoped_limits(json) {
-        let label = match resets_at.as_deref().and_then(parse_iso8601) {
-            Some(resets_at) => format!("{} {model_name}", format_remaining(resets_at - now)),
+        let resets_at = resets_at.as_deref().and_then(parse_iso8601);
+        let label = match resets_at.and_then(|resets_at| remaining_label(time, resets_at, now)) {
+            Some(remaining) => format!("{remaining} {model_name}"),
             None => format!("7d {model_name}"),
         };
         segments.push(format_percentage_segment(&label, value));
@@ -127,16 +156,26 @@ fn add_window_segment(
     percentage_path: &[&str],
     resets_path: &[&str],
     now: i64,
+    time: TimeDisplay,
 ) {
     let Some(value) = percentage_at(json, percentage_path) else {
         return;
     };
 
-    let label = match epoch_at(json, resets_path) {
-        Some(resets_at) => format_remaining(resets_at - now),
-        None => fallback_label.to_string(),
-    };
+    let label = epoch_at(json, resets_path)
+        .and_then(|resets_at| remaining_label(time, resets_at, now))
+        .unwrap_or_else(|| fallback_label.to_string());
     segments.push(format_percentage_segment(&label, value));
+}
+
+/// Countdown text for a window resetting at `resets_at`, per the display mode.
+/// `None` means the static fallback label should be used instead.
+fn remaining_label(time: TimeDisplay, resets_at: i64, now: i64) -> Option<String> {
+    match time {
+        TimeDisplay::None => None,
+        TimeDisplay::Normal => Some(format_remaining(resets_at - now)),
+        TimeDisplay::Short => Some(format_remaining_short(resets_at - now)),
+    }
 }
 
 /// Compact remaining time using the two largest non-zero units (e.g. `4h12m`,
@@ -163,6 +202,26 @@ fn format_remaining(secs: i64) -> String {
         } else {
             format!("{hours}h")
         }
+    } else {
+        format!("{minutes}m")
+    }
+}
+
+/// Like `format_remaining`, but only the single largest non-zero unit
+/// (e.g. `4h`, `6d`, `47m`).
+fn format_remaining_short(secs: i64) -> String {
+    if secs <= 60 {
+        return "<1m".to_string();
+    }
+
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let minutes = (secs % 3_600) / 60;
+
+    if days > 0 {
+        format!("{days}d")
+    } else if hours > 0 {
+        format!("{hours}h")
     } else {
         format!("{minutes}m")
     }
@@ -750,13 +809,79 @@ mod tests {
             }
         });
 
-        let out = format_status_line_with(&status, now).expect("segments should render");
+        let out = format_status_line_with(&status, now, TimeDisplay::Normal)
+            .expect("segments should render");
 
         assert!(out.contains(" 4h12m 24% "), "5h window: {out}");
         assert!(out.contains(" 6d3h 81% "), "7d window: {out}");
         // model_scoped reset is fixed, so pin the countdown against a fixed now.
-        let out = format_status_line_with(&status, 1_784_592_000).expect("segments should render");
+        let out = format_status_line_with(&status, 1_784_592_000, TimeDisplay::Normal)
+            .expect("segments should render");
         assert!(out.contains(" 1d3h Fable 13% "), "per-model window: {out}");
+    }
+
+    #[test]
+    fn window_labels_stay_static_in_none_mode() {
+        let now = 1_000_000_000;
+        let status = json!({
+            "rate_limits": {
+                "five_hour": { "used_percentage": 23.5, "resets_at": now + 15_120 },
+                "seven_day": { "used_percentage": 80.1, "resets_at": now + 529_200 },
+                "model_scoped": [
+                    { "display_name": "Fable", "utilization": 12.3,
+                      "resets_at": "2026-07-22T03:59:59.769790+00:00" }
+                ]
+            }
+        });
+
+        let out = format_status_line_with(&status, now, TimeDisplay::None)
+            .expect("segments should render");
+
+        assert!(out.contains(" 5h 24% "), "5h window: {out}");
+        assert!(out.contains(" 7d 81% "), "7d window: {out}");
+        assert!(out.contains(" 7d Fable 13% "), "per-model window: {out}");
+    }
+
+    #[test]
+    fn window_labels_show_single_unit_in_short_mode() {
+        let now = 1_784_592_000;
+        let status = json!({
+            "rate_limits": {
+                "five_hour": { "used_percentage": 23.5, "resets_at": now + 15_120 },
+                "seven_day": { "used_percentage": 80.1, "resets_at": now + 529_200 },
+                "model_scoped": [
+                    { "display_name": "Fable", "utilization": 12.3,
+                      "resets_at": "2026-07-22T03:59:59.769790+00:00" }
+                ]
+            }
+        });
+
+        let out = format_status_line_with(&status, now, TimeDisplay::Short)
+            .expect("segments should render");
+
+        assert!(out.contains(" 4h 24% "), "5h window: {out}");
+        assert!(out.contains(" 6d 81% "), "7d window: {out}");
+        assert!(out.contains(" 1d Fable 13% "), "per-model window: {out}");
+    }
+
+    #[test]
+    fn formats_remaining_short_with_largest_unit() {
+        assert_eq!(format_remaining_short(0), "<1m");
+        assert_eq!(format_remaining_short(60), "<1m");
+        assert_eq!(format_remaining_short(2820), "47m");
+        assert_eq!(format_remaining_short(15120), "4h");
+        assert_eq!(format_remaining_short(529200), "6d");
+    }
+
+    #[test]
+    fn parses_time_display_from_env_value() {
+        assert_eq!(time_display_from(None), TimeDisplay::Normal);
+        assert_eq!(time_display_from(Some("normal")), TimeDisplay::Normal);
+        assert_eq!(time_display_from(Some("none")), TimeDisplay::None);
+        assert_eq!(time_display_from(Some("short")), TimeDisplay::Short);
+        assert_eq!(time_display_from(Some(" NONE ")), TimeDisplay::None);
+        assert_eq!(time_display_from(Some("bogus")), TimeDisplay::Normal);
+        assert_eq!(time_display_from(Some("")), TimeDisplay::Normal);
     }
 
     #[test]
@@ -768,7 +893,8 @@ mod tests {
             }
         });
 
-        let out = format_status_line_with(&status, 1_000_000_000).expect("segments should render");
+        let out = format_status_line_with(&status, 1_000_000_000, TimeDisplay::Normal)
+            .expect("segments should render");
 
         assert!(out.contains(" 5h 24% "), "5h fallback: {out}");
         assert!(out.contains(" 7d 81% "), "7d fallback: {out}");
@@ -783,7 +909,8 @@ mod tests {
             }
         });
 
-        let out = format_status_line_with(&status, now).expect("segments should render");
+        let out = format_status_line_with(&status, now, TimeDisplay::Normal)
+            .expect("segments should render");
 
         assert!(out.contains(" <1m 24% "), "expired window: {out}");
     }

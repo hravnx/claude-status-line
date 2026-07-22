@@ -19,6 +19,24 @@ report a reset time for a window, the label falls back to its static name
 (`5h`, `7d`, `7d <model>`). The context window has no reset time, so it keeps
 its `ctx` label.
 
+The countdown style is configurable via the `CLAUDE_STATUS_LINE_TIME`
+environment variable:
+
+- unset or `normal`: two largest non-zero units (`4h12m`, `6d3h`) — the default
+- `short`: single largest unit only (`4h`, `6d`)
+- `none`: no countdown, static labels only (`5h`, `7d`, `7d <model>`)
+
+Unrecognized values fall back to `normal`. Set it in the `env` section of
+`~/.claude/settings.json` to apply it to the status line:
+
+```json
+{
+  "env": {
+    "CLAUDE_STATUS_LINE_TIME": "short"
+  }
+}
+```
+
 Percentage segments are rounded up and colored by usage:
 
 - green: up to 50%
