@@ -16,7 +16,11 @@ pub fn format_status_line(json: &serde_json::Value) -> Option<String> {
     format_status_line_with(json, now(), time_display())
 }
 
-fn format_status_line_with(json: &serde_json::Value, now: i64, time: TimeDisplay) -> Option<String> {
+fn format_status_line_with(
+    json: &serde_json::Value,
+    now: i64,
+    time: TimeDisplay,
+) -> Option<String> {
     let lines: Vec<String> = status_lines(json, now, time)
         .into_iter()
         .filter(|segments| !segments.is_empty())
